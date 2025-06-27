@@ -1,10 +1,35 @@
-import asyncio
-from collections import deque
-from math import ceil
+import asyncio 
 import random
 import time
+from math import ceil
 from tcputils import *
 
+class FilaSimples:
+    def __init__(self):
+        self._data = []
+        self._start = 0
+
+    def append(self, item):
+        self._data.append(item)
+
+    def popleft(self):
+        if self._start >= len(self._data):
+            raise IndexError("Fila vazia")
+        item = self._data[self._start]
+        self._start += 1
+        if self._start > 0 and (len(self._data) > 100 or self._start > 10):
+            self._data = self._data[self._start:]
+            self._start = 0
+        return item
+
+    def appendleft(self, item):
+        self._data.insert(self._start, item)
+
+    def __len__(self):
+        return len(self._data) - self._start
+
+    def __bool__(self):
+        return len(self) > 0
 
 class Servidor:
     def __init__(self, rede, porta):
@@ -55,28 +80,29 @@ class Conexao:
         self.seq_envio = random.randint(0, 0xffff)
         self.seq_no_eperado = seq_no + 1
         self.seq_no_comprimento = ack_no
-        self.fila_seguimentos_enviados = deque()
-        self.fila_seguimentos_esperando = deque()
+        self.fila_seguimentos_enviados = FilaSimples()
+        self.fila_seguimentos_esperando = FilaSimples()
         self.comprimento_seguimentos_enviados = 0
         self.tamanho_janela = 1 * MSS
         self.checado = False
         self.SampleRTT = 1
         self.EstimatedRTT = self.SampleRTT
-        self.DevRTT = self.SampleRTT/2
+        self.DevRTT = self.SampleRTT / 2
         self.TimeoutInterval = 1
         self.timer = None 
 
     def _temporizador(self):
         self.timer = None
-        self.tamanho_janela = self.tamanho_janela/2
+        self.tamanho_janela = self.tamanho_janela / 2
+
         if self.fila_seguimentos_enviados:
-            segment, addr, len_dados = self.fila_seguimentos_enviados.popleft()[1:]
+            firstTime, segment, addr, len_dados = self.fila_seguimentos_enviados.popleft()
             self.fila_seguimentos_enviados.appendleft((0, segment, addr, len_dados))
             self.servidor.rede.enviar(segment, addr)
             self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
-        if (flags & FLAGS_FIN == FLAGS_FIN):
+        if (flags & FLAGS_FIN) == FLAGS_FIN:
             self.callback(self, b'')
             self.seq_no_comprimento = ack_no
             src_addr, src_port, dst_addr, dst_port = self.id_conexao
@@ -101,15 +127,17 @@ class Conexao:
                 if self.timer:
                     self.timer.cancel()
                     self.timer = None
+
                     while self.fila_seguimentos_enviados:
                         firstTime, segmento, _, len_dados = self.fila_seguimentos_enviados.popleft()
                         self.comprimento_seguimentos_enviados -= len_dados
                         seq = read_header(segmento)[2]
                         if seq == ack_no:
                             break
+
                     if firstTime:
                         self.SampleRTT = time.time() - firstTime
-                        if self.checado == False:
+                        if not self.checado:
                             self.checado = True
                             self.EstimatedRTT = self.SampleRTT
                             self.DevRTT = self.SampleRTT / 2
@@ -139,14 +167,16 @@ class Conexao:
 
     def enviar(self, dados):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        size = ceil(len(dados)/MSS)
-        for i in range(size):
+        size = ceil(len(dados) / MSS)
+        i = 0
+        while i < size:
             self.seq_envio = self.seq_no_comprimento
             segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado, flags=FLAGS_ACK)
-            segment += (dados[ i * MSS : min((i + 1) * MSS, len(dados))])
+            segment += dados[i * MSS : min((i + 1) * MSS, len(dados))]
             len_dados = len(dados[i * MSS : min((i + 1) * MSS, len(dados))])
             self.seq_no_comprimento += len_dados
             response = fix_checksum(segment, dst_addr, src_addr)
+
             if self.comprimento_seguimentos_enviados + len_dados <= self.tamanho_janela:
                 self.servidor.rede.enviar(response, src_addr)
                 self.fila_seguimentos_enviados.append((time.time(), response, src_addr, len_dados))
@@ -154,7 +184,8 @@ class Conexao:
                 if not self.timer:
                     self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
             else:
-                self.fila_seguimentos_esperando.append((response, src_addr, len_dados))       
+                self.fila_seguimentos_esperando.append((response, src_addr, len_dados))
+            i += 1
 
     def fechar(self):
         self.seq_envio = self.seq_no_comprimento
